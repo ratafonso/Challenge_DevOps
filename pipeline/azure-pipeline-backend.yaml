@@ -1,0 +1,77 @@
+# Pipeline em Azure DevOps para Build de aplicações Maven Java 17
+trigger:
+  branches:
+    include:
+      - '*'
+pr:
+  branches:
+    include:
+      - main  # Apenas faz trigger da pipeline se o Pull Request tiver origem na branch "main"
+
+pool:
+  name: ada-eks-agent #Agente Azure DevOps no Cluster Kubernetes EKS
+  demands: java
+
+variables:
+  # Specify Maven and Java versions
+  MAVEN_VERSION: "3.6.3"
+  JAVA_HOME: "/usr/lib/jvm/java-17-openjdk-amd64"  # Ensure this path is correct for Java 17
+  # Especificando configuracoes para que o agente possa acessar a conta da AWS e fazer push da imagem
+  # Regiao desejada
+  AWS_REGION: "eu-central-1"
+  # Preencher com a id da sua conta AWS
+  AWS_ACCOUNT_ID: "5487121354787"
+  # URL do ECR gerado pelo terraform para o backend
+  ECR_REPOSITORY: "5487121354787.dkr.ecr.eu-central-1.amazonaws.com/backend"
+  # Tag para a imagem
+  IMAGE_TAG: $(ShortCommitHash)
+
+
+steps:
+  # 1. Gerando o Short Commit Hash para ser aplicado nas imagens geradas. O Short Commit Hash é um encurtamento do Commit Hash gerado em cada operação git commit. 
+  #    Isso ajuda a identificar de qual commit se trata o build e em caso da necessidade de fazer rollback, basta alterar o short commit hash na imagem e aplicá-la no ambiente novamente.
+  - script: |
+      shortHash=$(echo $(Build.SourceVersion) | cut -c1-7)
+      echo "##vso[task.setvariable variable=ShortCommitHash]$shortHash"
+      echo "The short commit hash is: $(ShortCommitHash)"
+    displayName: "Generate Short Commit Hash"
+
+  # 2. Set JAVA_HOME and verify Java version
+  - script: |
+      echo "##vso[task.setvariable variable=JAVA_HOME]$JAVA_HOME"
+      echo "Using Java version:"
+      java -version
+    displayName: "Set Java 17 and verify"
+
+  # 3. Build the project with Maven
+  - script: |
+      echo "Building the project with Maven"
+      mvn clean install -DskipTests
+    displayName: "Build the project using Maven"
+
+  # 4. Login na conta da AWS
+  - script: |
+      echo "Authenticating Docker to Amazon ECR..."
+      aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
+    displayName: 'Authenticate Docker with ECR'
+
+  # 5. Build da imagem Docker para a aplicação Backend
+  - script: |
+      echo "Building the Docker image..."
+      docker build -t $(ECR_REPOSITORY):$(IMAGE_TAG) .
+    displayName: 'Build Docker Image'
+
+  # 6. Aplicando tag na imagem gerada pela etapa anterior. É importante de acordo com as boas práticas manter um versionamento das imagens e utilizar tags como id do commit, versão da aplicação (v0.0.1) de acordo com a release lançada.
+  #    Criando um alias para a versão latest, sempre mantendo o último build disponível.
+  - script: |
+      echo "Tagging the Docker image for ECR..."
+      docker tag $(ECR_REPOSITORY):$(IMAGE_TAG) $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPOSITORY):$(IMAGE_TAG)
+      docker tag $(ECR_REPOSITORY):$(IMAGE_TAG) $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPOSITORY):latest
+    displayName: 'Tag Docker Image'
+
+  # 7. Push da imagem gerada com a tag gerada anteriormente para o Amazon ECR (Container Registry)
+  - script: |
+      echo "Pushing the Docker image to Amazon ECR..."
+      docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPOSITORY):$(IMAGE_TAG)
+      docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPOSITORY):latest
+    displayName: 'Push Docker Image to ECR'
